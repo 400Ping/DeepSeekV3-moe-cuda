@@ -2,7 +2,7 @@
 #include <tvm/ffi/container/tensor.h>
 
 // Include the existing CUDA kernel implementation
-#include "test_group_max.cu"
+#include "router_v2.cu"
 
 namespace ffi = tvm::ffi;
 
