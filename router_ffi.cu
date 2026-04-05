@@ -1,12 +1,16 @@
 #include <tvm/ffi/tvm_ffi.h>
 #include <tvm/ffi/container/tensor.h>
 
-// Include the existing CUDA kernel implementation
+// Include CUDA kernel implementations
 #include "router_v2.cu"
+#include "scan.cu"
+#include "dispatch.cu"
 
 namespace ffi = tvm::ffi;
 
-// Wrapper function that matches the TVM-FFI interface requirements
+// ============================================================================
+// Kernel 1: Router FFI Wrapper
+// ============================================================================
 void router_ffi_wrapper(ffi::Tensor routing_logits,         // [T, 256]
                         ffi::Tensor routing_bias,           // [256]
                         ffi::Tensor expert_token_counts,    // [256] or [E_local]
@@ -37,6 +41,45 @@ void router_ffi_wrapper(ffi::Tensor routing_logits,         // [T, 256]
     );
 }
 
-// Register the wrapper function as a TVM global function
-// This allows it to be called from Python using tvm_ffi.get_global_func
-static auto _ = ffi::reflection::GlobalDef().def("router_ffi", router_ffi_wrapper);
+// ============================================================================
+// Kernel 2: Prefix Sum (Scan) FFI Wrapper
+// ============================================================================
+// Converts expert_token_counts[E] into expert_offsets[E+1] via exclusive scan.
+// After this kernel:
+//   expert_offsets[e] = starting index in the dispatch buffer for expert e
+//   expert_offsets[E] = total number of dispatched tokens
+void scan_ffi_wrapper(ffi::Tensor d_input,   // [num_items] expert token counts
+                      ffi::Tensor d_output,  // [num_items] expert offsets (exclusive scan)
+                      int num_items) {
+    exclusive_scan_cub(
+        static_cast<int*>(d_input.data_ptr()),
+        static_cast<int*>(d_output.data_ptr()),
+        num_items
+    );
+}
+
+// ============================================================================
+// Kernel 3: Token Dispatch FFI Wrapper
+// ============================================================================
+void dispatch_ffi_wrapper(ffi::Tensor dequantized_hidden_states,  // [T, H]
+                          ffi::Tensor token_expert_indices,        // [T, TOP_K]
+                          ffi::Tensor token_expert_slots,          // [T, TOP_K]
+                          ffi::Tensor expert_offsets,               // [E_GLOBAL + 1]
+                          ffi::Tensor permuted_tokens,             // [T * TOP_K, H]
+                          int T, int TOP_K, int H) {
+    launch_token_dispatch(
+        static_cast<const float*>(dequantized_hidden_states.data_ptr()),
+        static_cast<const int*>(token_expert_indices.data_ptr()),
+        static_cast<const int*>(token_expert_slots.data_ptr()),
+        static_cast<const int*>(expert_offsets.data_ptr()),
+        static_cast<float*>(permuted_tokens.data_ptr()),
+        T, TOP_K, H
+    );
+}
+
+// ============================================================================
+// TVM-FFI Global Function Registrations
+// ============================================================================
+static auto _router   = ffi::reflection::GlobalDef().def("router_ffi",   router_ffi_wrapper);
+static auto _scan     = ffi::reflection::GlobalDef().def("scan_ffi",     scan_ffi_wrapper);
+static auto _dispatch = ffi::reflection::GlobalDef().def("dispatch_ffi", dispatch_ffi_wrapper);
