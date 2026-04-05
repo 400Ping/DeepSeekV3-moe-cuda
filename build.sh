@@ -1,9 +1,13 @@
 #!/bin/bash
-# RTX 4060 has compute capability 8.9
-nvcc -shared -Xcompiler -fPIC \
-    -arch=sm_89 \
-    -I/home/weimin.chen/.local/lib/python3.10/site-packages/tvm_ffi/include \
-    -L/home/weimin.chen/.local/lib/python3.10/site-packages/tvm_ffi/lib \
+# Use paths relative to the uv environment
+VENV_PATH=$(pwd)/.venv
+NVCC=nvcc
+TVM_FFI_PATH=$VENV_PATH/lib/python3.12/site-packages/tvm_ffi
+
+$NVCC -shared -Xcompiler -fPIC \
+    -arch=sm_90 \
+    -I$TVM_FFI_PATH/include \
+    -L$TVM_FFI_PATH/lib \
     -ltvm_ffi \
     -o librouter_ffi.so \
     router_ffi.cu

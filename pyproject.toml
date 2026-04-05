@@ -1,0 +1,19 @@
+[project]
+name = "deepseekv3-moe-cuda"
+version = "0.1.0"
+description = "DeepSeekV3 MoE CUDA Kernels"
+dependencies = [
+    "torch==2.11.0+cu130",
+    "apache-tvm-ffi",
+    "numpy",
+    "pytest",
+]
+requires-python = ">=3.12"
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }

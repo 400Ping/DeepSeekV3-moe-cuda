@@ -1,4 +1,5 @@
 #include <cub/cub.cuh>
+#include <cuda_bf16.h>
 #include "src/utils.cuh"
 
 struct rankItem {
@@ -21,10 +22,11 @@ struct GreaterRankItem {
 template<int E_GLOBAL, int E_LOCAL, int TOP_K>
 __global__ void router(
     const float* __restrict__ routing_logits, // [T, E_global]
-    const float* __restrict__ routing_bias,   // [E_global]
+    const __nv_bfloat16* __restrict__ routing_bias,   // [E_global]
     int* expert_token_counts,                 // [E_global]
     int* token_expert_indices,                // [T, TOP_K]
     float* token_expert_weights,              // [T, TOP_K]
+    int* token_expert_slots,                  // [T, TOP_K]
     int T, int local_expert_offset, float routed_scaling_factor) {
 
     int token = blockIdx.x;
@@ -45,14 +47,11 @@ __global__ void router(
     typedef cub::WarpMergeSort<rankItem, 2, 32> WarpSort64;
     __shared__ typename WarpSort64::TempStorage final_sort_temp;
 
-    typedef cub::BlockHistogram<int, 256, 1, E_GLOBAL + 1, cub::BLOCK_HISTO_ATOMIC> BlockHistogram;
-    __shared__ typename BlockHistogram::TempStorage histo_temp;
-
     __shared__ float s_group_scores[N_GROUP];
     __shared__ bool group_mask[N_GROUP];
     __shared__ rankItem shared_candidates[64];
     __shared__ int final_indices[8];
-    __shared__ int smem_histogram[E_GLOBAL + 1];
+
 
     // Initialization
     if (tid < 8) final_indices[tid] = -1;
@@ -60,7 +59,7 @@ __global__ void router(
 
     // 1. Warp Sort for Group Top-2
     float logit = routing_logits[token * E_GLOBAL + tid];
-    float s_wb = sigmoid(logit) + routing_bias[tid];
+    float s_wb = sigmoid(logit) + __bfloat162float(routing_bias[tid]);
 
     rankItem item_arr[1];
     item_arr[0].score = s_wb;
@@ -141,17 +140,10 @@ __global__ void router(
     }
     __syncthreads();
 
-    // 4. Expert Counting using CUB BlockHistogram
-    int my_histo_item_arr[1];
-    my_histo_item_arr[0] = (tid < 8 && final_indices[tid] != -1) ? final_indices[tid] : E_GLOBAL; 
-    
-    BlockHistogram(histo_temp).Histogram(my_histo_item_arr, smem_histogram);
-    __syncthreads();
-
-    if (tid < E_GLOBAL) {
-        int count = smem_histogram[tid];
-        if (count > 0) {
-            atomicAdd(&expert_token_counts[tid], count);
-        }
+    // 4. Expert Counting & Slot Assignment via atomicAdd
+    if (tid < TOP_K && final_indices[tid] != -1) {
+        int expert_id = final_indices[tid];
+        int slot = atomicAdd(&expert_token_counts[expert_id], 1);
+        token_expert_slots[token * TOP_K + tid] = slot;
     }
 }
