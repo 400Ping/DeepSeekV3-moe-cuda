@@ -1,0 +1,54 @@
+{
+	"name": "autoagent_dev",
+	"image": "autoagent_dev:latest",
+	"runArgs": [
+	  "--gpus=all",
+	  "--ipc=host"
+	],
+	"containerEnv": {
+	  "NVIDIA_VISIBLE_DEVICES": "all",
+	  "NVIDIA_DRIVER_CAPABILITIES": "compute,utility"
+	},
+	"remoteEnv": {
+	  "PATH": "${containerEnv:PATH}:/usr/local/cuda/bin",
+	  "LD_LIBRARY_PATH": "$LD_LIBRARY_PATH:/usr/local/cuda/lib64:/usr/local/cuda/extras/CUPTI/lib64",
+	  "XLA_FLAGS": "--xla_gpu_cuda_data_dir=/usr/local/cuda",
+	  "CODEX_API_KEY": "${localEnv:CODEX_API_KEY}"
+	},
+	"settings": {
+	  "terminal.integrated.shell.linux": "/bin/bash",
+	  "terminal.integrated.shellArgs.linux": [
+		"-c",
+		"nvidia-cuda-mps-control -d && bash"
+	  ]
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-vscode.cmake-tools",
+				"mhutchie.git-graph",
+				"ms-vscode.cpptools",
+				"VisualStudioExptTeam.intellicode-api-usage-examples",
+				"VisualStudioExptTeam.vscodeintellicode-completions",
+				"VisualStudioExptTeam.vscodeintellicode-insiders",
+				"nvidia.nsight-vscode-edition",
+				"ms-python.python",
+				"ms-azuretools.vscode-docker",
+				"ms-python.vscode-pylance",
+				"ms-python.debugpy",
+				"ritwickdey.LiveServer",
+				"ms-python.autopep8",
+				"ms-python.black-formatter",
+				"ms-vscode.cpptools-extension-pack",
+				"ms-vscode.live-server",
+				"eamodio.gitlens"
+			]
+		}
+	},
+	"workspaceFolder": "/workspace",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+	"mounts": [
+		"source=${localEnv:HOME}${localEnv:USERPROFILE},target=/home,type=bind,consistency=cached"
+	],
+	"postCreateCommand": "mkdir -p /root/.ssh && cp /home/.ssh/id_ed25519 /root/.ssh/ && cp /home/.ssh/id_rsa /root/.ssh/ && cp /home/.ssh/known_hosts /root/.ssh/ && chmod 700 /root/.ssh && chmod 600 /root/.ssh/id_*"
+  }
