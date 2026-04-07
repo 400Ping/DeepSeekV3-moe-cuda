@@ -1,3 +1,5 @@
+// Author:  justin
+// Description:  Token dispatching with FP8 block-scale dequantization
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
 #include <cuda_fp16.h>

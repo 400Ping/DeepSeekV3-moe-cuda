@@ -7,7 +7,7 @@
 // T6 roofline summary
 // T7 backend benchmark
 
-#include "kernel4.cuh"
+#include "../kernels/moe_expert_mlp/kernel4.cuh"
 
 #include <cstdio>
 #include <cstdlib>

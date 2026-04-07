@@ -1,11 +1,11 @@
 // Standalone test for Kernel 2: Prefix Sum (Scan)
-// Compile:  nvcc -arch=sm_89 -o test_scan test_scan.cu
+// Compile:  nvcc -arch=sm_90 -o test_scan tests/test_moe_scan_cuda.cu
 // Run:      ./test_scan
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include "scan.cu"
+#include "../kernels/moe_scan.cu"
 
 void cpu_exclusive_scan(const int* in, int* out, int n) {
     out[0] = 0;

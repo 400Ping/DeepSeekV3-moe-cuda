@@ -2,9 +2,9 @@
 #include <tvm/ffi/container/tensor.h>
 
 // Include the existing CUDA kernel implementations
-#include "router_v2.cu"
-#include "scan.cu"
-#include "dispatch.cu"
+#include "moe_routing.cu"
+#include "moe_scan.cu"
+#include "moe_dispatch.cu"
 
 namespace ffi = tvm::ffi;
 

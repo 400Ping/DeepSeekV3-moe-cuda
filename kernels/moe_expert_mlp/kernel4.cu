@@ -1,3 +1,5 @@
+// Author:  Eddie Tsai
+// Description:  Expert MLP (GEMM1 -> SwiGLU -> GEMM2) with FP8 support
 #include "kernel4_internal.cuh"
 
 #include <algorithm>

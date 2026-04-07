@@ -1,3 +1,6 @@
+// Author:  Jie-Kai Chang
+// Description:  Expert offset calculation via Exclusive Prefix Sum (Scan)
+
 // Kernel 2: Prefix Sum (Scan) using CUB
 // Logic: Converts expert token counts into global offsets (pointers)
 //        in the dispatch buffer via exclusive prefix sum.

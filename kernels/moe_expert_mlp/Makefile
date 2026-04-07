@@ -12,6 +12,7 @@ CUTLASS_DIR ?= $(DEFAULT_CUTLASS_DIR)
 
 SRC_DIR := .
 TEST_DIR := test
+TEST_DIR := ../../tests
 
 SOURCES := \
 	$(SRC_DIR)/kernel4.cu \
@@ -19,7 +20,7 @@ SOURCES := \
 	$(SRC_DIR)/kernel4_backends.cu \
 	$(SRC_DIR)/kernel4_cpu_reference.cu \
 	$(SRC_DIR)/kernel4_cutlass.cu \
-	$(TEST_DIR)/test.cu
+	$(TEST_DIR)/test_moe_expert_mlp_cuda.cu
 HEADERS := \
 	$(SRC_DIR)/kernel4.cuh \
 	$(SRC_DIR)/kernel4_internal.cuh

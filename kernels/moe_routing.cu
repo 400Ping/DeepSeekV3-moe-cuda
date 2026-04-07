@@ -1,6 +1,8 @@
+// Author:  wei-min chen
+// Description:  DeepSeek-V3 "No-aux" routing logic (Sigmoid + Groups + Top-K)
 #include <cub/cub.cuh>
 #include <cuda_bf16.h>
-#include "src/utils.cuh"
+#include "include/utils.cuh"
 
 struct rankItem {
     float score;
