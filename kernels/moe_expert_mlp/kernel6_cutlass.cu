@@ -1,0 +1,410 @@
+#include "kernel6_internal.cuh"
+
+#if defined(K4_ENABLE_CUTLASS)
+
+#include <algorithm>
+#include <vector>
+
+#include <cutlass/cutlass.h>
+#include <cutlass/gemm/device/default_gemm_configuration.h>
+#include <cutlass/gemm/device/gemm_grouped.h>
+#include <cutlass/gemm/kernel/default_gemm_grouped.h>
+#include <cutlass/gemm/threadblock/threadblock_swizzle.h>
+
+namespace kernel6_internal {
+
+constexpr int kCutlassGroupedBatchExperts = 2;
+
+using CutlassGroupedConfig = cutlass::gemm::device::DefaultGemmConfiguration<
+    cutlass::arch::OpClassSimt,
+    cutlass::arch::Sm80,
+    float,
+    float,
+    float,
+    float>;
+
+using CutlassGroupedKernel = typename cutlass::gemm::kernel::DefaultGemmGrouped<
+    float,
+    cutlass::layout::RowMajor,
+    cutlass::ComplexTransform::kNone,
+    1,
+    float,
+    cutlass::layout::ColumnMajor,
+    cutlass::ComplexTransform::kNone,
+    1,
+    float,
+    cutlass::layout::RowMajor,
+    float,
+    cutlass::arch::OpClassSimt,
+    cutlass::arch::Sm80,
+    typename CutlassGroupedConfig::ThreadblockShape,
+    typename CutlassGroupedConfig::WarpShape,
+    typename CutlassGroupedConfig::InstructionShape,
+    typename CutlassGroupedConfig::EpilogueOutputOp,
+    cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle,
+    CutlassGroupedConfig::kStages,
+    cutlass::gemm::kernel::GroupScheduleMode::kDeviceOnly>::GemmKernel;
+
+using CutlassGroupedGemm = cutlass::gemm::device::GemmGrouped<CutlassGroupedKernel>;
+using CutlassGroupedStrideA = typename CutlassGroupedGemm::LayoutA::Stride::LongIndex;
+using CutlassGroupedStrideB = typename CutlassGroupedGemm::LayoutB::Stride::LongIndex;
+using CutlassGroupedStrideC = typename CutlassGroupedGemm::LayoutC::Stride::LongIndex;
+
+struct CutlassScratchView {
+    float* inter_f32;
+    float* w2_dequant;
+    cutlass::gemm::GemmCoord* problem_sizes;
+    float** ptr_A;
+    float** ptr_B;
+    float** ptr_C;
+    float** ptr_D;
+    CutlassGroupedStrideA* lda;
+    CutlassGroupedStrideB* ldb;
+    CutlassGroupedStrideC* ldc;
+    CutlassGroupedStrideC* ldd;
+    void* gemm_workspace;
+};
+
+size_t cutlass_aux_bytes(int total_dispatched_tokens) {
+    size_t total = 0;
+    total += align_up((size_t)total_dispatched_tokens * INTERMEDIATE_SIZE * sizeof(float));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * HIDDEN_SIZE * INTERMEDIATE_SIZE * sizeof(float));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(cutlass::gemm::GemmCoord));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideA));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideB));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideC));
+    total += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideC));
+    return total;
+}
+
+static CutlassScratchView bind_cutlass_scratch(void* storage,
+                                               size_t storage_bytes,
+                                               int total_dispatched_tokens) {
+    CutlassScratchView view{};
+    if (!storage) {
+        return view;
+    }
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(storage);
+    uintptr_t cursor = align_up(base);
+
+    view.inter_f32 = reinterpret_cast<float*>(cursor);
+    cursor += align_up((size_t)total_dispatched_tokens * INTERMEDIATE_SIZE * sizeof(float));
+
+    view.w2_dequant = reinterpret_cast<float*>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * HIDDEN_SIZE * INTERMEDIATE_SIZE * sizeof(float));
+
+    view.problem_sizes = reinterpret_cast<cutlass::gemm::GemmCoord*>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(cutlass::gemm::GemmCoord));
+
+    view.ptr_A = reinterpret_cast<float**>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+
+    view.ptr_B = reinterpret_cast<float**>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+
+    view.ptr_C = reinterpret_cast<float**>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+
+    view.ptr_D = reinterpret_cast<float**>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(float*));
+
+    view.lda = reinterpret_cast<CutlassGroupedStrideA*>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideA));
+
+    view.ldb = reinterpret_cast<CutlassGroupedStrideB*>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideB));
+
+    view.ldc = reinterpret_cast<CutlassGroupedStrideC*>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideC));
+
+    view.ldd = reinterpret_cast<CutlassGroupedStrideC*>(cursor);
+    cursor += align_up((size_t)kCutlassGroupedBatchExperts * sizeof(CutlassGroupedStrideC));
+
+    view.gemm_workspace = reinterpret_cast<void*>(cursor);
+    if (cursor - base > storage_bytes) {
+        return CutlassScratchView{};
+    }
+    return view;
+}
+
+static cudaError_t cutlass_status_to_cuda_error(cutlass::Status status) {
+    switch (status) {
+        case cutlass::Status::kSuccess:
+            return cudaSuccess;
+        case cutlass::Status::kErrorNotSupported:
+        case cutlass::Status::kErrorArchMismatch:
+            return cudaErrorNotSupported;
+        case cutlass::Status::kErrorMemoryAllocation:
+            return cudaErrorMemoryAllocation;
+        case cutlass::Status::kErrorWorkspaceNull:
+        case cutlass::Status::kErrorInvalidProblem:
+        case cutlass::Status::kErrorMisalignedOperand:
+        case cutlass::Status::kErrorInvalidLayout:
+        case cutlass::Status::kErrorInvalidDataType:
+            return cudaErrorInvalidValue;
+        case cutlass::Status::kErrorInsufficientDriver:
+            return cudaErrorInsufficientDriver;
+        case cutlass::Status::kErrorInternal:
+        case cutlass::Status::kInvalid:
+            return cudaErrorUnknown;
+    }
+    return cudaErrorUnknown;
+}
+
+static cudaError_t run_cutlass_grouped_float_gemm(
+    CutlassScratchView const& scratch,
+    std::vector<cutlass::gemm::GemmCoord> const& host_problem_sizes,
+    std::vector<float*> const& host_ptr_A,
+    std::vector<float*> const& host_ptr_B,
+    std::vector<float*> const& host_ptr_D,
+    std::vector<CutlassGroupedStrideA> const& host_lda,
+    std::vector<CutlassGroupedStrideB> const& host_ldb,
+    std::vector<CutlassGroupedStrideC> const& host_ldd,
+    cudaStream_t stream) {
+    int problem_count = static_cast<int>(host_problem_sizes.size());
+    if (problem_count == 0) {
+        return cudaSuccess;
+    }
+
+    std::vector<float*> host_ptr_C = host_ptr_D;
+    std::vector<CutlassGroupedStrideC> host_ldc = host_ldd;
+
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.problem_sizes,
+        host_problem_sizes.data(),
+        problem_count * sizeof(cutlass::gemm::GemmCoord),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.ptr_A,
+        host_ptr_A.data(),
+        problem_count * sizeof(float*),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.ptr_B,
+        host_ptr_B.data(),
+        problem_count * sizeof(float*),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.ptr_C,
+        host_ptr_C.data(),
+        problem_count * sizeof(float*),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.ptr_D,
+        host_ptr_D.data(),
+        problem_count * sizeof(float*),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.lda,
+        host_lda.data(),
+        problem_count * sizeof(CutlassGroupedStrideA),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.ldb,
+        host_ldb.data(),
+        problem_count * sizeof(CutlassGroupedStrideB),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.ldc,
+        host_ldc.data(),
+        problem_count * sizeof(CutlassGroupedStrideC),
+        cudaMemcpyHostToDevice,
+        stream));
+    K6_CUDA_CHECK(cudaMemcpyAsync(
+        scratch.ldd,
+        host_ldd.data(),
+        problem_count * sizeof(CutlassGroupedStrideC),
+        cudaMemcpyHostToDevice,
+        stream));
+
+    CutlassGroupedGemm gemm_op;
+    int threadblock_count = CutlassGroupedGemm::sufficient(
+        host_problem_sizes.data(), problem_count);
+    if (!threadblock_count) {
+        return cudaErrorNotSupported;
+    }
+
+    typename CutlassGroupedGemm::EpilogueOutputOp::Params epilogue_op(1.0f, 0.0f);
+    typename CutlassGroupedGemm::Arguments args(
+        scratch.problem_sizes,
+        problem_count,
+        threadblock_count,
+        epilogue_op,
+        scratch.ptr_A,
+        scratch.ptr_B,
+        scratch.ptr_C,
+        scratch.ptr_D,
+        scratch.lda,
+        scratch.ldb,
+        scratch.ldc,
+        scratch.ldd,
+        const_cast<cutlass::gemm::GemmCoord*>(host_problem_sizes.data()));
+
+    cutlass::Status status = gemm_op(args, scratch.gemm_workspace, stream);
+    if (status != cutlass::Status::kSuccess) {
+        fprintf(stderr, "CUTLASS grouped GEMM failed: %s\n", cutlass::cutlassGetStatusString(status));
+    }
+    return cutlass_status_to_cuda_error(status);
+}
+
+bool current_device_is_sm86_or_better() {
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+        return false;
+    }
+    cudaDeviceProp prop{};
+    if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
+        return false;
+    }
+    return prop.major > 8 || (prop.major == 8 && prop.minor >= 6);
+}
+
+cudaError_t launch_cutlass_gemm2_combine(const Gemm2Problem& p,
+                                         const Gemm2Workspace& workspace,
+                                         int total_tokens) {
+    if (!workspace.cutlass_workspace) {
+        return cudaErrorInvalidValue;
+    }
+
+    std::vector<int> host_offsets(NUM_LOCAL_EXPERTS + 1, 0);
+    K6_CUDA_CHECK(cudaMemcpy(host_offsets.data(),
+                             p.expert_token_offsets,
+                             host_offsets.size() * sizeof(int),
+                             cudaMemcpyDeviceToHost));
+
+    CutlassScratchView scratch = bind_cutlass_scratch(
+        workspace.cutlass_workspace,
+        workspace.cutlass_workspace_bytes,
+        total_tokens);
+    if (!scratch.inter_f32 || !scratch.w2_dequant ||
+        !scratch.problem_sizes || !scratch.ptr_A || !scratch.ptr_B ||
+        !scratch.ptr_C || !scratch.ptr_D || !scratch.lda || !scratch.ldb ||
+        !scratch.ldc || !scratch.ldd) {
+        return cudaErrorInvalidValue;
+    }
+
+    K6_CUDA_CHECK(cudaMemsetAsync(
+        workspace.output_accum,
+        0,
+        output_accum_bytes(p.seq_len),
+        p.stream));
+
+    constexpr int threads = 256;
+    int inter_total_all = total_tokens * INTERMEDIATE_SIZE;
+    bf16_rows_to_f32_kernel<<<(inter_total_all + threads - 1) / threads, threads, 0, p.stream>>>(
+        p.hidden_states,
+        0,
+        total_tokens,
+        INTERMEDIATE_SIZE,
+        scratch.inter_f32
+    );
+    K6_CUDA_CHECK(cudaGetLastError());
+
+    struct ActiveExpert {
+        int expert;
+        int begin;
+        int token_count;
+    };
+    std::vector<ActiveExpert> active_experts;
+    for (int expert = 0; expert < NUM_LOCAL_EXPERTS; ++expert) {
+        int begin = host_offsets[expert];
+        int end = host_offsets[expert + 1];
+        if (end > begin) {
+            active_experts.push_back({expert, begin, end - begin});
+        }
+    }
+
+    std::vector<cutlass::gemm::GemmCoord> problem_sizes;
+    std::vector<float*> ptr_A;
+    std::vector<float*> ptr_B;
+    std::vector<float*> ptr_D;
+    std::vector<CutlassGroupedStrideA> lda;
+    std::vector<CutlassGroupedStrideB> ldb;
+    std::vector<CutlassGroupedStrideC> ldd;
+    problem_sizes.reserve(kCutlassGroupedBatchExperts);
+    ptr_A.reserve(kCutlassGroupedBatchExperts);
+    ptr_B.reserve(kCutlassGroupedBatchExperts);
+    ptr_D.reserve(kCutlassGroupedBatchExperts);
+    lda.reserve(kCutlassGroupedBatchExperts);
+    ldb.reserve(kCutlassGroupedBatchExperts);
+    ldd.reserve(kCutlassGroupedBatchExperts);
+
+    int gemm2_weight_total = HIDDEN_SIZE * INTERMEDIATE_SIZE;
+    for (size_t batch_start = 0; batch_start < active_experts.size(); batch_start += kCutlassGroupedBatchExperts) {
+        size_t batch_count = std::min<size_t>(kCutlassGroupedBatchExperts, active_experts.size() - batch_start);
+        problem_sizes.clear();
+        ptr_A.clear();
+        ptr_B.clear();
+        ptr_D.clear();
+        lda.clear();
+        ldb.clear();
+        ldd.clear();
+
+        for (size_t i = 0; i < batch_count; ++i) {
+            const ActiveExpert& info = active_experts[batch_start + i];
+            const fp8_e4m3* w2_e = p.gemm2_weights +
+                (size_t)info.expert * HIDDEN_SIZE * INTERMEDIATE_SIZE;
+            const float* w2s_e = p.gemm2_weights_scale +
+                (size_t)info.expert * NUM_HIDDEN_BLOCKS * NUM_INTER_BLOCKS;
+
+            float* w2_slot = scratch.w2_dequant + i * (size_t)HIDDEN_SIZE * INTERMEDIATE_SIZE;
+            dequant_gemm2_weight_kernel<<<(gemm2_weight_total + threads - 1) / threads, threads, 0, p.stream>>>(
+                w2_e,
+                w2s_e,
+                w2_slot
+            );
+            K6_CUDA_CHECK(cudaGetLastError());
+
+            problem_sizes.push_back({info.token_count, HIDDEN_SIZE, INTERMEDIATE_SIZE});
+            ptr_A.push_back(scratch.inter_f32 + (size_t)info.begin * INTERMEDIATE_SIZE);
+            ptr_B.push_back(w2_slot);
+            ptr_D.push_back(workspace.gemm2_output + (size_t)info.begin * HIDDEN_SIZE);
+            lda.push_back(INTERMEDIATE_SIZE);
+            ldb.push_back(INTERMEDIATE_SIZE);
+            ldd.push_back(HIDDEN_SIZE);
+        }
+
+        K6_CUDA_CHECK(run_cutlass_grouped_float_gemm(
+            scratch, problem_sizes, ptr_A, ptr_B, ptr_D, lda, ldb, ldd, p.stream));
+    }
+
+    dim3 block(256);
+    dim3 combine_grid(total_tokens, (HIDDEN_SIZE + block.x - 1) / block.x);
+    combine_projected_kernel<<<combine_grid, block, 0, p.stream>>>(
+        workspace.gemm2_output,
+        p.token_indices,
+        p.token_expert_weights,
+        p.routed_scaling_factor,
+        workspace.output_accum,
+        total_tokens,
+        p.seq_len
+    );
+    K6_CUDA_CHECK(cudaGetLastError());
+
+    int total_output_elems = p.seq_len * HIDDEN_SIZE;
+    dim3 pack_grid((total_output_elems + block.x - 1) / block.x);
+    f32_to_bf16_kernel<<<pack_grid, block, 0, p.stream>>>(
+        workspace.output_accum,
+        p.output,
+        total_output_elems
+    );
+    K6_CUDA_CHECK(cudaGetLastError());
+
+    return cudaSuccess;
+}
+
+}  // namespace kernel6_internal
+
+#endif
