@@ -24,41 +24,29 @@ cudaError_t launch_fallback_backend(const Kernel4Problem& p,
     CUDA_CHECK(cudaMemsetAsync(
         workspace.output_accum,
         0,
-        output_accum_bytes(p.seq_len),
+        kernel6_internal::output_accum_bytes(p.seq_len),
         p.stream));
 
-    dim3 gemm2_grid(total_tokens, (HIDDEN_SIZE + block.x - 1) / block.x);
-    fp8_gemm2_project_kernel<<<gemm2_grid, block, 0, p.stream>>>(
-        workspace.gemm1_output,
-        p.expert_token_offsets,
-        p.gemm2_weights,
-        p.gemm2_weights_scale,
-        workspace.gemm2_output,
-        total_tokens,
-        NUM_LOCAL_EXPERTS
-    );
-    CUDA_CHECK(cudaGetLastError());
+    kernel6_internal::Gemm2Problem shared_problem{};
+    shared_problem.hidden_states = workspace.gemm1_output;
+    shared_problem.gemm2_weights = p.gemm2_weights;
+    shared_problem.gemm2_weights_scale = p.gemm2_weights_scale;
+    shared_problem.expert_token_offsets = p.expert_token_offsets;
+    shared_problem.token_indices = p.token_indices;
+    shared_problem.token_expert_weights = p.token_expert_weights;
+    shared_problem.routed_scaling_factor = p.routed_scaling_factor;
+    shared_problem.seq_len = p.seq_len;
+    shared_problem.stream = p.stream;
+    shared_problem.output = p.output;
 
-    combine_projected_kernel<<<gemm2_grid, block, 0, p.stream>>>(
-        workspace.gemm2_output,
-        p.token_indices,
-        p.token_expert_weights,
-        p.routed_scaling_factor,
-        workspace.output_accum,
-        total_tokens,
-        p.seq_len
-    );
-    CUDA_CHECK(cudaGetLastError());
+    kernel6_internal::Gemm2Workspace shared_workspace{};
+    shared_workspace.gemm2_output = workspace.gemm2_output;
+    shared_workspace.output_accum = workspace.output_accum;
+    shared_workspace.cutlass_workspace = nullptr;
+    shared_workspace.cutlass_workspace_bytes = 0;
 
-    int total_output_elems = p.seq_len * HIDDEN_SIZE;
-    dim3 pack_grid((total_output_elems + block.x - 1) / block.x);
-    f32_to_bf16_kernel<<<pack_grid, block, 0, p.stream>>>(
-        workspace.output_accum,
-        p.output,
-        total_output_elems
-    );
-    CUDA_CHECK(cudaGetLastError());
-    return cudaSuccess;
+    return kernel6_internal::launch_fallback_gemm2_combine(
+        shared_problem, shared_workspace, total_tokens);
 }
 
 cudaError_t launch_tiled_backend(const Kernel4Problem& p,
@@ -105,42 +93,29 @@ cudaError_t launch_tiled_backend(const Kernel4Problem& p,
     CUDA_CHECK(cudaMemsetAsync(
         workspace.output_accum,
         0,
-        output_accum_bytes(p.seq_len),
+        kernel6_internal::output_accum_bytes(p.seq_len),
         p.stream));
 
-    dim3 block(256);
-    dim3 gemm2_grid(total_tokens, (HIDDEN_SIZE + block.x - 1) / block.x);
-    fp8_gemm2_project_kernel<<<gemm2_grid, block, 0, p.stream>>>(
-        workspace.gemm1_output,
-        p.expert_token_offsets,
-        p.gemm2_weights,
-        p.gemm2_weights_scale,
-        workspace.gemm2_output,
-        total_tokens,
-        NUM_LOCAL_EXPERTS
-    );
-    CUDA_CHECK(cudaGetLastError());
+    kernel6_internal::Gemm2Problem shared_problem{};
+    shared_problem.hidden_states = workspace.gemm1_output;
+    shared_problem.gemm2_weights = p.gemm2_weights;
+    shared_problem.gemm2_weights_scale = p.gemm2_weights_scale;
+    shared_problem.expert_token_offsets = p.expert_token_offsets;
+    shared_problem.token_indices = p.token_indices;
+    shared_problem.token_expert_weights = p.token_expert_weights;
+    shared_problem.routed_scaling_factor = p.routed_scaling_factor;
+    shared_problem.seq_len = p.seq_len;
+    shared_problem.stream = p.stream;
+    shared_problem.output = p.output;
 
-    combine_projected_kernel<<<gemm2_grid, block, 0, p.stream>>>(
-        workspace.gemm2_output,
-        p.token_indices,
-        p.token_expert_weights,
-        p.routed_scaling_factor,
-        workspace.output_accum,
-        total_tokens,
-        p.seq_len
-    );
-    CUDA_CHECK(cudaGetLastError());
+    kernel6_internal::Gemm2Workspace shared_workspace{};
+    shared_workspace.gemm2_output = workspace.gemm2_output;
+    shared_workspace.output_accum = workspace.output_accum;
+    shared_workspace.cutlass_workspace = nullptr;
+    shared_workspace.cutlass_workspace_bytes = 0;
 
-    int total_output_elems = p.seq_len * HIDDEN_SIZE;
-    dim3 pack_grid((total_output_elems + block.x - 1) / block.x);
-    f32_to_bf16_kernel<<<pack_grid, block, 0, p.stream>>>(
-        workspace.output_accum,
-        p.output,
-        total_output_elems
-    );
-    CUDA_CHECK(cudaGetLastError());
-    return cudaSuccess;
+    return kernel6_internal::launch_fallback_gemm2_combine(
+        shared_problem, shared_workspace, total_tokens);
 }
 
 }  // namespace kernel4_internal

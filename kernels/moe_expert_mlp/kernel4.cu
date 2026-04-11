@@ -11,8 +11,8 @@ size_t k4_query_workspace(int seq_len,
                           size_t cutlass_workspace_bytes) {
     size_t total = 0;
     total += kernel4_internal::align_up(kernel4_internal::gemm1_output_bytes(total_dispatched_tokens));
-    total += kernel4_internal::align_up(kernel4_internal::gemm2_output_bytes(total_dispatched_tokens));
-    total += kernel4_internal::align_up(kernel4_internal::output_accum_bytes(seq_len));
+    total += kernel4_internal::align_up(kernel6_internal::gemm2_output_bytes(total_dispatched_tokens));
+    total += kernel4_internal::align_up(kernel6_internal::output_accum_bytes(seq_len));
 #if defined(K4_ENABLE_CUTLASS)
     cutlass_workspace_bytes = std::max(
         cutlass_workspace_bytes,
@@ -50,11 +50,11 @@ Kernel4Workspace k4_bind_workspace(void* storage,
 
         workspace.gemm2_output = reinterpret_cast<float*>(cursor);
         cursor += kernel4_internal::align_up(
-            kernel4_internal::gemm2_output_bytes(total_dispatched_tokens));
+            kernel6_internal::gemm2_output_bytes(total_dispatched_tokens));
     }
 
     workspace.output_accum = reinterpret_cast<float*>(cursor);
-    cursor += kernel4_internal::align_up(kernel4_internal::output_accum_bytes(seq_len));
+    cursor += kernel4_internal::align_up(kernel6_internal::output_accum_bytes(seq_len));
 
     if (cutlass_workspace_bytes > 0) {
         workspace.cutlass_workspace = reinterpret_cast<void*>(cursor);
@@ -73,7 +73,7 @@ Kernel4Workspace k4_bind_workspace(void* storage,
 
 bool k4_cutlass_available() {
 #if defined(K4_ENABLE_CUTLASS)
-    return kernel4_internal::current_device_is_sm86_or_better();
+    return kernel6_internal::current_device_is_sm86_or_better();
 #else
     return false;
 #endif
