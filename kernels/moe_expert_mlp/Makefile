@@ -20,10 +20,17 @@ SOURCES := \
 	$(SRC_DIR)/kernel4_backends.cu \
 	$(SRC_DIR)/kernel4_cpu_reference.cu \
 	$(SRC_DIR)/kernel4_cutlass.cu \
+	$(SRC_DIR)/kernel6.cu \
+	$(SRC_DIR)/kernel6_cuda_kernels.cu \
+	$(SRC_DIR)/kernel6_backends.cu \
+	$(SRC_DIR)/kernel6_cpu_reference.cu \
+	$(SRC_DIR)/kernel6_cutlass.cu \
 	$(TEST_DIR)/test_moe_expert_mlp_cuda.cu
 HEADERS := \
 	$(SRC_DIR)/kernel4.cuh \
-	$(SRC_DIR)/kernel4_internal.cuh
+	$(SRC_DIR)/kernel4_internal.cuh \
+	$(SRC_DIR)/kernel6.cuh \
+	$(SRC_DIR)/kernel6_internal.cuh
 
 COMMON_INCLUDES := -I$(SRC_DIR) -I$(TEST_DIR)
 COMMON_NVCCFLAGS := -std=c++17 -O2 -arch=$(CUDA_ARCH) $(COMMON_INCLUDES)

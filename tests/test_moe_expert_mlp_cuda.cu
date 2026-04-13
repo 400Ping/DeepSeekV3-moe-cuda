@@ -4,10 +4,11 @@
 // T3 SwiGLU
 // T4 routing
 // T5 launch correctness
-// T6 roofline summary
+// T6 kernel6 launch correctness
 // T7 backend benchmark
 
 #include "../kernels/moe_expert_mlp/kernel4.cuh"
+#include "../kernels/moe_expert_mlp/kernel6.cuh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -85,6 +86,12 @@ static float max_abs_diff_bf16(const std::vector<float>& ref,
 }
 
 static float silu(float x) { return x/(1.f+expf(-x)); }
+
+static uint16_t float_to_bf16_bits(float v) {
+    uint32_t bits = 0;
+    memcpy(&bits, &v, sizeof(bits));
+    return static_cast<uint16_t>(bits >> 16);
+}
 
 static void fill_quantized_random(size_t n,
                                   float lo,
@@ -403,10 +410,211 @@ bool test_kernel4_launch_smoke() {
     return ok;
 }
 
-// ─── Test 6: Backend benchmark ───────────────────────────────────────────────
+// ─── Test 6: Standalone Kernel 6 coverage ────────────────────────────────────
+
+bool test_kernel6_launch_smoke() {
+    printf("\n[T6] Kernel 6 launch coverage (fallback + CUTLASS)\n");
+
+    const float routed_scaling_factor = 1.25f;
+    const float tol = 0.35f;
+    const bool cutlass_available = k6_cutlass_available();
+
+    std::vector<LaunchCase> cases;
+    cases.push_back({"zero dispatch", 2, {}, std::vector<int>(NUM_LOCAL_EXPERTS + 1, 0), {}});
+
+    std::vector<int> single_offsets(NUM_LOCAL_EXPERTS + 1, 2);
+    single_offsets[0] = 0;
+    single_offsets[1] = 2;
+    cases.push_back({"single expert, seq_len=2", 2, {1, 0}, single_offsets, {0.65f, 0.35f}});
+
+    std::vector<int> multi_offsets(NUM_LOCAL_EXPERTS + 1, 6);
+    multi_offsets[0] = 0;
+    multi_offsets[1] = 2;
+    multi_offsets[2] = 6;
+    cases.push_back({"multi expert combine", 4, {1, 0, 1, 3, 0, 3}, multi_offsets,
+                     {0.5f, 0.25f, 0.3f, 0.4f, 0.2f, 0.15f}});
+
+    bool ok = true;
+    for (const auto& tc : cases) {
+        const int total_tok = tc.expert_offsets.back();
+        const int expert_span = active_expert_span(tc.expert_offsets);
+        const size_t inter_elems = std::max<size_t>(1, (size_t)total_tok * INTERMEDIATE_SIZE);
+        const size_t gemm2_weight_elems = (size_t)expert_span * HIDDEN_SIZE * INTERMEDIATE_SIZE;
+        const size_t gemm2_scale_elems = (size_t)expert_span * NUM_HIDDEN_BLOCKS * NUM_INTER_BLOCKS;
+
+        auto inter_f32 = randf(inter_elems, -0.25f, 0.25f);
+        std::vector<uint16_t> inter_bf16(inter_elems);
+        for (size_t i = 0; i < inter_elems; ++i) {
+            inter_bf16[i] = float_to_bf16_bits(inter_f32[i]);
+        }
+
+        std::vector<uint8_t> w2_fp8;
+        std::vector<float> w2_q_f32;
+        fill_quantized_random(gemm2_weight_elems, -0.05f, 0.05f, w2_fp8, w2_q_f32);
+        auto w2_scale_f32 = randf(gemm2_scale_elems, 0.5f, 1.25f);
+
+        std::vector<float> ref_out((size_t)tc.seq_len * HIDDEN_SIZE, 0.f);
+        k6_reference_cpu(
+            reinterpret_cast<const __nv_bfloat16*>(inter_bf16.data()),
+            tc.token_indices.empty() ? nullptr : tc.token_indices.data(),
+            tc.expert_offsets.data(),
+            w2_q_f32.data(),
+            w2_scale_f32.data(),
+            tc.routing_weights.empty() ? nullptr : tc.routing_weights.data(),
+            routed_scaling_factor,
+            tc.seq_len,
+            total_tok,
+            ref_out.data());
+
+        auto run_backend = [&](Kernel6Backend backend,
+                               std::vector<uint16_t>& gpu_out,
+                               float& max_err,
+                               bool& skipped) {
+            skipped = false;
+            uint16_t *d_inter = nullptr, *d_out = nullptr;
+            fp8_e4m3 *d_w2 = nullptr;
+            float *d_ws2 = nullptr, *d_rw = nullptr;
+            int *d_off = nullptr, *d_tok = nullptr;
+            void* d_workspace = nullptr;
+
+            CHECK(cudaMalloc(&d_inter, inter_bf16.size() * sizeof(uint16_t)));
+            CHECK(cudaMalloc(&d_w2, w2_fp8.size() * sizeof(fp8_e4m3)));
+            CHECK(cudaMalloc(&d_ws2, w2_scale_f32.size() * sizeof(float)));
+            CHECK(cudaMalloc(&d_out, ref_out.size() * sizeof(uint16_t)));
+            CHECK(cudaMalloc(&d_off, tc.expert_offsets.size() * sizeof(int)));
+            if (!tc.token_indices.empty()) CHECK(cudaMalloc(&d_tok, tc.token_indices.size() * sizeof(int)));
+            if (!tc.routing_weights.empty()) CHECK(cudaMalloc(&d_rw, tc.routing_weights.size() * sizeof(float)));
+
+            size_t workspace_bytes = k6_query_workspace(tc.seq_len, total_tok);
+            if (workspace_bytes > 0) CHECK(cudaMalloc(&d_workspace, workspace_bytes));
+
+            CHECK(cudaMemcpy(d_inter, inter_bf16.data(), inter_bf16.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+            CHECK(cudaMemcpy(d_w2, w2_fp8.data(), w2_fp8.size() * sizeof(fp8_e4m3), cudaMemcpyHostToDevice));
+            CHECK(cudaMemcpy(d_ws2, w2_scale_f32.data(), w2_scale_f32.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CHECK(cudaMemcpy(d_off, tc.expert_offsets.data(), tc.expert_offsets.size() * sizeof(int), cudaMemcpyHostToDevice));
+            if (d_tok) CHECK(cudaMemcpy(d_tok, tc.token_indices.data(), tc.token_indices.size() * sizeof(int), cudaMemcpyHostToDevice));
+            if (d_rw) CHECK(cudaMemcpy(d_rw, tc.routing_weights.data(), tc.routing_weights.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+            Kernel6Workspace workspace = k6_bind_workspace(
+                d_workspace, workspace_bytes, tc.seq_len, total_tok);
+
+            Kernel6Problem problem{};
+            problem.seq_len = tc.seq_len;
+            problem.hidden_states = reinterpret_cast<__nv_bfloat16*>(d_inter);
+            problem.gemm2_weights = d_w2;
+            problem.gemm2_weights_scale = d_ws2;
+            problem.local_expert_offset = 0;
+            problem.routed_scaling_factor = routed_scaling_factor;
+            problem.expert_token_offsets = d_off;
+            problem.token_indices = d_tok;
+            problem.token_expert_weights = d_rw;
+            problem.output = reinterpret_cast<__nv_bfloat16*>(d_out);
+            problem.backend = backend;
+            problem.stream = nullptr;
+
+            cudaError_t err = k6_launch(problem, workspace);
+            if (backend == Kernel6Backend::Cutlass && err == cudaErrorNotSupported) {
+                skipped = true;
+            } else {
+                CHECK(err);
+                CHECK(cudaDeviceSynchronize());
+                gpu_out.resize(ref_out.size());
+                CHECK(cudaMemcpy(gpu_out.data(), d_out, gpu_out.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+                max_err = max_abs_diff_bf16(ref_out, gpu_out);
+            }
+
+            cudaFree(d_inter); cudaFree(d_w2); cudaFree(d_ws2); cudaFree(d_rw);
+            cudaFree(d_out); cudaFree(d_off); cudaFree(d_tok); cudaFree(d_workspace);
+        };
+
+        std::vector<uint16_t> fallback_out;
+        float fallback_err = 0.f;
+        bool fallback_skipped = false;
+        run_backend(Kernel6Backend::Fallback, fallback_out, fallback_err, fallback_skipped);
+        bool fallback_ok = !fallback_skipped && fallback_err < tol;
+        ok &= fallback_ok;
+        printf("  %-24s fallback max_err=%.6f %s\n",
+               tc.name, fallback_err, fallback_ok ? "ok" : "fail");
+
+        std::vector<uint16_t> cutlass_out;
+        float cutlass_err = 0.f;
+        bool cutlass_skipped = false;
+        run_backend(Kernel6Backend::Cutlass, cutlass_out, cutlass_err, cutlass_skipped);
+        if (cutlass_skipped) {
+            printf("  %-24s CUTLASS skipped (%s)\n",
+                   tc.name, cutlass_available ? "backend unavailable" : "built without CUTLASS");
+        } else {
+            bool cutlass_ok = cutlass_err < tol;
+            ok &= cutlass_ok;
+            printf("  %-24s CUTLASS max_err=%.6f %s\n",
+                   tc.name, cutlass_err, cutlass_ok ? "ok" : "fail");
+        }
+    }
+
+    if (!cutlass_available) {
+        std::vector<int> off(NUM_LOCAL_EXPERTS + 1, 1);
+        off[0] = 0;
+        std::vector<uint16_t> inter(INTERMEDIATE_SIZE, float_to_bf16_bits(0.1f));
+        std::vector<uint8_t> w2(HIDDEN_SIZE * INTERMEDIATE_SIZE, float_to_fp8(0.01f));
+        std::vector<float> w2s(NUM_HIDDEN_BLOCKS * NUM_INTER_BLOCKS, 1.f);
+        std::vector<int> tok(1, 0);
+        std::vector<float> rw(1, 1.f);
+        uint16_t* d_inter = nullptr;
+        uint16_t* d_out = nullptr;
+        fp8_e4m3* d_w2 = nullptr;
+        float* d_ws2 = nullptr;
+        int* d_off = nullptr;
+        int* d_tok = nullptr;
+        float* d_rw = nullptr;
+        void* d_workspace = nullptr;
+        CHECK(cudaMalloc(&d_inter, inter.size() * sizeof(uint16_t)));
+        CHECK(cudaMalloc(&d_off, off.size() * sizeof(int)));
+        CHECK(cudaMalloc(&d_tok, sizeof(int)));
+        CHECK(cudaMalloc(&d_rw, sizeof(float)));
+        CHECK(cudaMalloc(&d_w2, w2.size() * sizeof(fp8_e4m3)));
+        CHECK(cudaMalloc(&d_ws2, w2s.size() * sizeof(float)));
+        CHECK(cudaMemcpy(d_off, off.data(), off.size() * sizeof(int), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(d_inter, inter.data(), inter.size() * sizeof(uint16_t), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(d_tok, tok.data(), sizeof(int), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(d_rw, rw.data(), sizeof(float), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(d_w2, w2.data(), w2.size() * sizeof(fp8_e4m3), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(d_ws2, w2s.data(), w2s.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CHECK(cudaMalloc(&d_out, (size_t)HIDDEN_SIZE * sizeof(uint16_t)));
+        size_t workspace_bytes = k6_query_workspace(1, 1);
+        CHECK(cudaMalloc(&d_workspace, workspace_bytes));
+        Kernel6Workspace workspace = k6_bind_workspace(d_workspace, workspace_bytes, 1, 1);
+        Kernel6Problem problem{};
+        problem.seq_len = 1;
+        problem.hidden_states = reinterpret_cast<__nv_bfloat16*>(d_inter);
+        problem.gemm2_weights = d_w2;
+        problem.gemm2_weights_scale = d_ws2;
+        problem.expert_token_offsets = d_off;
+        problem.token_indices = d_tok;
+        problem.token_expert_weights = d_rw;
+        problem.output = reinterpret_cast<__nv_bfloat16*>(d_out);
+        problem.backend = Kernel6Backend::Cutlass;
+        cudaError_t err = k6_launch(problem, workspace);
+        bool not_supported = (err == cudaErrorNotSupported);
+        ok &= not_supported;
+        printf("  explicit Cutlass request without support: %s\n", not_supported ? "ok" : "fail");
+        cudaFree(d_inter);
+        cudaFree(d_w2);
+        cudaFree(d_ws2);
+        cudaFree(d_off);
+        cudaFree(d_tok);
+        cudaFree(d_rw);
+        cudaFree(d_out);
+        cudaFree(d_workspace);
+    }
+
+    printf("  Result: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+// ─── Test 7: Backend benchmark ───────────────────────────────────────────────
 
 bool benchmark_backends() {
-    printf("\n[T6] Backend benchmark (reference vs tiled vs CUTLASS)\n");
+    printf("\n[T7] Backend benchmark (reference vs tiled vs CUTLASS)\n");
 
     const int S = 128;
     const int total_tok = 128;
@@ -545,6 +753,7 @@ int main() {
     all &= test_swiglu_numerics();
     all &= test_routing();
     all &= test_kernel4_launch_smoke();
+    all &= test_kernel6_launch_smoke();
     all &= benchmark_backends();
 
     printf("\n══════════════════════════════════\n");
